@@ -19,6 +19,10 @@ name: Build Windows & Android (my fork)
 # 所以这里用官方同样的方式自己补上：
 #   package-windows  -> 便携版 zip
 #   pack-installer   -> 单文件 exe（等价于官方 rustdesk-<ver>-install.exe）
+#
+# 两个打包 job 都用 `always()`：官方 flutter-build 里只要有一个平台 job 卡死/被取消，
+# 整个 run 会被判成 cancelled 并连坐跳过依赖它的 job。用 always() 可以让打包照常进行，
+# 拿不到产物时只发 warning，不把整个 run 弄红。
 
 on:
   workflow_dispatch:
@@ -51,7 +55,7 @@ jobs:
   package-windows:
     name: package windows portable zip
     needs: build
-    if: ${{ inputs.package-windows }}
+    if: ${{ always() && inputs.package-windows }}
     runs-on: windows-2022
     steps:
       - name: Checkout (拿版本号)
@@ -70,12 +74,21 @@ jobs:
           Write-Host "version = $v"
 
       - name: Download Windows portable artifact
+        id: dl
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: rustdesk-unsigned-windows-${{ inputs.windows-arch }}
           path: _pkg
 
+      - name: Warn and stop if artifact missing
+        if: ${{ steps.dl.outcome != 'success' }}
+        shell: pwsh
+        run: |
+          Write-Host "::warning::没有取到 rustdesk-unsigned-windows-${{ inputs.windows-arch }}，跳过打包（Windows 构建可能没跑到或失败了）"
+
       - name: Verify packaged exe exists
+        if: ${{ steps.dl.outcome == 'success' }}
         shell: pwsh
         run: |
           if (-not (Test-Path '_pkg/rustdesk/rustdesk.exe')) {
@@ -87,6 +100,7 @@ jobs:
           Get-ChildItem _pkg/rustdesk | Select-Object -First 15 Name, Length
 
       - name: Create portable zip
+        if: ${{ steps.dl.outcome == 'success' }}
         shell: pwsh
         run: |
           $name = "rustdesk-${{ steps.ver.outputs.version }}-windows-${{ inputs.windows-arch }}-portable.zip"
@@ -94,6 +108,7 @@ jobs:
           Write-Host "created $name ($([math]::Round((Get-Item $name).Length/1MB,2)) MB)"
 
       - name: Upload portable zip
+        if: ${{ steps.dl.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: rustdesk-windows-${{ inputs.windows-arch }}-portable.zip
@@ -104,7 +119,7 @@ jobs:
   pack-installer:
     name: pack single-file installer exe
     needs: build
-    if: ${{ inputs.pack-installer }}
+    if: ${{ always() && inputs.pack-installer }}
     runs-on: windows-2022
     steps:
       - name: Checkout
@@ -129,13 +144,22 @@ jobs:
           Write-Host "version = $v"
 
       - name: Download Windows portable artifact
+        id: dl2
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           # 单文件安装包用 x86_64 作为载荷，与官方 x86_64 安装包一致
           name: rustdesk-unsigned-windows-x86_64
           path: rustdesk
 
+      - name: Warn and stop if artifact missing
+        if: ${{ steps.dl2.outcome != 'success' }}
+        shell: pwsh
+        run: |
+          Write-Host "::warning::没有取到 rustdesk-unsigned-windows-x86_64，跳过单文件打包"
+
       - name: Generate blob + build portable packer
+        if: ${{ steps.dl2.outcome == 'success' }}
         shell: pwsh
         working-directory: libs/portable
         run: |
@@ -156,6 +180,7 @@ jobs:
           Write-Host "created $f ($([math]::Round((Get-Item $f).Length/1MB,2)) MB)"
 
       - name: Upload installer exe
+        if: ${{ steps.dl2.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: rustdesk-windows-x86_64-install.exe
