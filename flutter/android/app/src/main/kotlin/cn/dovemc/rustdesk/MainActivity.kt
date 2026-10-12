@@ -1,4 +1,4 @@
-package com.carriez.flutter_hbb
+package cn.dovemc.rustdesk
 
 /**
  * Handle events from flutter
