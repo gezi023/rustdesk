@@ -1,0 +1,26 @@
+name: Build Windows & Android (my fork)
+
+# 手动触发：Actions 页面 -> 选这个 workflow -> Run workflow
+# 会调用官方 flutter-build.yml，但强制 upload-artifact: true，
+# 因此构建产物会上传到 Actions 的 Artifacts 里可直接下载。
+#
+# 依赖的仓库 Secrets（Settings -> Secrets and variables -> Actions）：
+#   ANDROID_SIGNING_KEY         : keystore 的 base64（F:\keys\android_signing_key.txt）
+#   ANDROID_ALIAS               : rustdesk
+#   ANDROID_KEY_STORE_PASSWORD  : keystore 密码
+#   ANDROID_KEY_PASSWORD        : key 密码
+#
+# 说明：Android 的 "Upload Artifacts" 步骤带 `ANDROID_SIGNING_KEY != null` 条件，
+# 没有上面这个 secret 的话 APK 不会被上传（会退化成"发布未签名 APK 到 Release"并失败）。
+# Windows 的产物上传只依赖 upload-artifact，不需要 secret。
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    uses: ./.github/workflows/flutter-build.yml
+    secrets: inherit
+    with:
+      upload-artifact: true
+      upload-tag: nightly
