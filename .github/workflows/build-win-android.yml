@@ -14,8 +14,11 @@ name: Build Windows & Android (my fork)
 # 没有上面这个 secret 的话 APK 不会被上传（会退化成"发布未签名 APK 到 Release"并失败）。
 # Windows 的产物上传只依赖 upload-artifact，不需要 secret。
 #
-# 额外：官方 Windows 产物是「便携版目录」（名字叫 rustdesk-unsigned-windows-<arch>），
-# 下面 package-windows 会把它重新打成规范命名的 zip，方便直接下载分发。
+# 官方 Windows 产物是「便携版目录」(rustdesk-unsigned-windows-<arch>)。
+# 官方生成单文件安装包 .exe 的那一步被 `SIGN_BASE_URL != '-2'` 挡住（没配签名证书就跳过），
+# 所以这里用官方同样的方式自己补上：
+#   package-windows  -> 便携版 zip
+#   pack-installer   -> 单文件 exe（等价于官方 rustdesk-<ver>-install.exe）
 
 on:
   workflow_dispatch:
@@ -29,7 +32,11 @@ on:
           - aarch64
           - x86
       package-windows:
-        description: "构建后把 Windows 便携版打成 zip"
+        description: "构建后打包 Windows 便携版 zip"
+        type: boolean
+        default: true
+      pack-installer:
+        description: "构建后生成单文件安装包 exe"
         type: boolean
         default: true
 
@@ -76,20 +83,82 @@ jobs:
             Get-ChildItem -Recurse -Depth 2 _pkg | Select-Object -First 40 FullName
             exit 1
           }
-          Write-Host "zip 内容一览："
+          Write-Host "便携版内容一览："
           Get-ChildItem _pkg/rustdesk | Select-Object -First 15 Name, Length
 
-      - name: Create zip
+      - name: Create portable zip
         shell: pwsh
         run: |
           $name = "rustdesk-${{ steps.ver.outputs.version }}-windows-${{ inputs.windows-arch }}-portable.zip"
           Compress-Archive -Path '_pkg/rustdesk' -DestinationPath $name -CompressionLevel Optimal
           Write-Host "created $name ($([math]::Round((Get-Item $name).Length/1MB,2)) MB)"
 
-      - name: Upload zip
+      - name: Upload portable zip
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: rustdesk-windows-${{ inputs.windows-arch }}-portable.zip
           path: rustdesk-${{ steps.ver.outputs.version }}-windows-${{ inputs.windows-arch }}-portable.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  pack-installer:
+    name: pack single-file installer exe
+    needs: build
+    if: ${{ inputs.pack-installer }}
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+
+      - name: Install Python deps
+        shell: pwsh
+        run: python -m pip install --disable-pip-version-check -r libs/portable/requirements.txt
+
+      - name: Read version from Cargo.toml
+        id: ver
+        shell: pwsh
+        run: |
+          $line = Select-String -Path Cargo.toml -Pattern '^version\s*=' | Select-Object -First 1
+          $v = ($line.Line -split '"')[1]
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "version = $v"
+
+      - name: Download Windows portable artifact
+        uses: actions/download-artifact@v4
+        with:
+          # 单文件安装包用 x86_64 作为载荷，与官方 x86_64 安装包一致
+          name: rustdesk-unsigned-windows-x86_64
+          path: rustdesk
+
+      - name: Generate blob + build portable packer
+        shell: pwsh
+        working-directory: libs/portable
+        run: |
+          if (-not (Test-Path '../../rustdesk/rustdesk/rustdesk.exe')) {
+            Write-Host "::error::未找到 ../../rustdesk/rustdesk/rustdesk.exe"
+            Get-ChildItem -Recurse -Depth 2 ../../rustdesk | Select-Object -First 30 FullName
+            exit 1
+          }
+          # generate.py 会写 data.bin / app_metadata.toml 并自己 cargo build 出 rustdesk-portable-packer.exe
+          python ./generate.py -f ../../rustdesk/rustdesk -o . -e ../../rustdesk/rustdesk/rustdesk.exe
+          if (-not (Test-Path './target/release/rustdesk-portable-packer.exe')) {
+            Write-Host "::error::打包器未生成"
+            exit 1
+          }
+          Copy-Item './target/release/rustdesk-portable-packer.exe' `
+            "../../rustdesk-${{ steps.ver.outputs.version }}-x86_64-install.exe" -Force
+          $f = "../../rustdesk-${{ steps.ver.outputs.version }}-x86_64-install.exe"
+          Write-Host "created $f ($([math]::Round((Get-Item $f).Length/1MB,2)) MB)"
+
+      - name: Upload installer exe
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rustdesk-windows-x86_64-install.exe
+          path: rustdesk-${{ steps.ver.outputs.version }}-x86_64-install.exe
           if-no-files-found: error
           retention-days: 30
