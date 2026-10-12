@@ -13,9 +13,25 @@ name: Build Windows & Android (my fork)
 # 说明：Android 的 "Upload Artifacts" 步骤带 `ANDROID_SIGNING_KEY != null` 条件，
 # 没有上面这个 secret 的话 APK 不会被上传（会退化成"发布未签名 APK 到 Release"并失败）。
 # Windows 的产物上传只依赖 upload-artifact，不需要 secret。
+#
+# 额外：官方 Windows 产物是「便携版目录」（名字叫 rustdesk-unsigned-windows-<arch>），
+# 下面 package-windows 会把它重新打成规范命名的 zip，方便直接下载分发。
 
 on:
   workflow_dispatch:
+    inputs:
+      windows-arch:
+        description: "要打包的 Windows 架构"
+        type: choice
+        default: x86_64
+        options:
+          - x86_64
+          - aarch64
+          - x86
+      package-windows:
+        description: "构建后把 Windows 便携版打成 zip"
+        type: boolean
+        default: true
 
 jobs:
   build:
@@ -24,3 +40,56 @@ jobs:
     with:
       upload-artifact: true
       upload-tag: nightly
+
+  package-windows:
+    name: package windows portable zip
+    needs: build
+    if: ${{ inputs.package-windows }}
+    runs-on: windows-2022
+    steps:
+      - name: Checkout (拿版本号)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          sparse-checkout: Cargo.toml
+          sparse-checkout-cone-mode: false
+
+      - name: Read version from Cargo.toml
+        id: ver
+        shell: pwsh
+        run: |
+          $line = Select-String -Path Cargo.toml -Pattern '^version\s*=' | Select-Object -First 1
+          $v = ($line.Line -split '"')[1]
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "version = $v"
+
+      - name: Download Windows portable artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: rustdesk-unsigned-windows-${{ inputs.windows-arch }}
+          path: _pkg
+
+      - name: Verify packaged exe exists
+        shell: pwsh
+        run: |
+          if (-not (Test-Path '_pkg/rustdesk/rustdesk.exe')) {
+            Write-Host "::error::未找到 _pkg/rustdesk/rustdesk.exe，产物结构与预期不符"
+            Get-ChildItem -Recurse -Depth 2 _pkg | Select-Object -First 40 FullName
+            exit 1
+          }
+          Write-Host "zip 内容一览："
+          Get-ChildItem _pkg/rustdesk | Select-Object -First 15 Name, Length
+
+      - name: Create zip
+        shell: pwsh
+        run: |
+          $name = "rustdesk-${{ steps.ver.outputs.version }}-windows-${{ inputs.windows-arch }}-portable.zip"
+          Compress-Archive -Path '_pkg/rustdesk' -DestinationPath $name -CompressionLevel Optimal
+          Write-Host "created $name ($([math]::Round((Get-Item $name).Length/1MB,2)) MB)"
+
+      - name: Upload zip
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rustdesk-windows-${{ inputs.windows-arch }}-portable.zip
+          path: rustdesk-${{ steps.ver.outputs.version }}-windows-${{ inputs.windows-arch }}-portable.zip
+          if-no-files-found: error
+          retention-days: 30
