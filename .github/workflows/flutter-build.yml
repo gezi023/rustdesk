@@ -622,7 +622,8 @@ jobs:
             ./SignOutput/rustdesk-*.exe
 
   build-rustdesk-ios:
-    if: ${{ inputs.upload-artifact }}
+    # [本地定制] iOS 不需要，跳过
+    if: false
     name: build rustdesk ios ipa
     runs-on: ${{ matrix.job.os }}
     needs: [generate-bridge]
@@ -744,6 +745,9 @@ jobs:
 
 
   build-for-macOS:
+    # [本地定制] 只需要 Windows + 安卓。macOS 的 x86_64 job 曾卡死 6 小时
+    # 把整个 run 拖成 cancelled，连坐跳过 Windows/安卓 的打包 job，故整体跳过。
+    if: false
     name: ${{ matrix.job.target }}
     runs-on: ${{ matrix.job.os }}
     needs: [generate-bridge]
