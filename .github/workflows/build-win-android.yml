@@ -79,7 +79,7 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: rustdesk-unsigned-windows-${{ inputs.windows-arch }}
-          path: _pkg
+          path: _win
 
       - name: Warn and stop if artifact missing
         if: ${{ steps.dl.outcome != 'success' }}
@@ -87,28 +87,43 @@ jobs:
         run: |
           Write-Host "::warning::没有取到 rustdesk-unsigned-windows-${{ inputs.windows-arch }}，跳过打包（Windows 构建可能没跑到或失败了）"
 
-      - name: Verify packaged exe exists
+      - name: Locate packaged app directory
+        id: locate
         if: ${{ steps.dl.outcome == 'success' }}
         shell: pwsh
         run: |
-          if (-not (Test-Path '_pkg/rustdesk/rustdesk.exe')) {
-            Write-Host "::error::未找到 _pkg/rustdesk/rustdesk.exe，产物结构与预期不符"
-            Get-ChildItem -Recurse -Depth 2 _pkg | Select-Object -First 40 FullName
+          # 不假设产物层级：GitHub 上传目录时会把目录「内容」放到产物根，
+          # 所以 rustdesk.exe 可能在 _win/ 下，也可能在 _win/rustdesk/ 下。
+          $exe = Get-ChildItem -Path _win -Filter rustdesk.exe -Recurse -File |
+                 Select-Object -First 1
+          if (-not $exe) {
+            Write-Host "::error::在 _win 下找不到 rustdesk.exe，产物结构与预期不符"
+            Get-ChildItem -Recurse -Depth 3 _win | Select-Object -First 40 FullName
             exit 1
           }
-          Write-Host "便携版内容一览："
-          Get-ChildItem _pkg/rustdesk | Select-Object -First 15 Name, Length
+          $dir = $exe.Directory.FullName
+          "appdir=$dir" >> $env:GITHUB_OUTPUT
+          Write-Host "找到 exe : $($exe.FullName)"
+          Write-Host "应用目录 : $dir"
+          Write-Host "目录内容 :"
+          Get-ChildItem $dir | Select-Object -First 20 Name, Length
 
       - name: Create portable zip
-        if: ${{ steps.dl.outcome == 'success' }}
+        if: ${{ steps.locate.outcome == 'success' }}
         shell: pwsh
         run: |
+          $src = '${{ steps.locate.outputs.appdir }}'
           $name = "rustdesk-${{ steps.ver.outputs.version }}-windows-${{ inputs.windows-arch }}-portable.zip"
-          Compress-Archive -Path '_pkg/rustdesk' -DestinationPath $name -CompressionLevel Optimal
+          Compress-Archive -Path $src -DestinationPath $name -CompressionLevel Optimal
           Write-Host "created $name ($([math]::Round((Get-Item $name).Length/1MB,2)) MB)"
+          Write-Host "zip 内顶层条目："
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $name))
+          $zip.Entries | Select-Object -First 8 -ExpandProperty FullName | Write-Host
+          $zip.Dispose()
 
       - name: Upload portable zip
-        if: ${{ steps.dl.outcome == 'success' }}
+        if: ${{ steps.locate.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: rustdesk-windows-${{ inputs.windows-arch }}-portable.zip
@@ -150,7 +165,7 @@ jobs:
         with:
           # 单文件安装包用 x86_64 作为载荷，与官方 x86_64 安装包一致
           name: rustdesk-unsigned-windows-x86_64
-          path: rustdesk
+          path: _win
 
       - name: Warn and stop if artifact missing
         if: ${{ steps.dl2.outcome != 'success' }}
@@ -158,20 +173,42 @@ jobs:
         run: |
           Write-Host "::warning::没有取到 rustdesk-unsigned-windows-x86_64，跳过单文件打包"
 
-      - name: Generate blob + build portable packer
+      - name: Locate packaged app directory
+        id: locate2
         if: ${{ steps.dl2.outcome == 'success' }}
         shell: pwsh
-        working-directory: libs/portable
         run: |
-          if (-not (Test-Path '../../rustdesk/rustdesk/rustdesk.exe')) {
-            Write-Host "::error::未找到 ../../rustdesk/rustdesk/rustdesk.exe"
-            Get-ChildItem -Recurse -Depth 2 ../../rustdesk | Select-Object -First 30 FullName
+          $exe = Get-ChildItem -Path _win -Filter rustdesk.exe -Recurse -File |
+                 Select-Object -First 1
+          if (-not $exe) {
+            Write-Host "::error::在 _win 下找不到 rustdesk.exe"
+            Get-ChildItem -Recurse -Depth 3 _win | Select-Object -First 40 FullName
             exit 1
           }
+          "appdir=$($exe.Directory.FullName)" >> $env:GITHUB_OUTPUT
+          "exepath=$($exe.FullName)" >> $env:GITHUB_OUTPUT
+          Write-Host "找到 exe : $($exe.FullName)"
+          Get-ChildItem $exe.Directory.FullName | Select-Object -First 15 Name, Length
+
+      - name: Generate blob + build portable packer
+        if: ${{ steps.locate2.outcome == 'success' }}
+        shell: pwsh
+        working-directory: libs/portable
+        env:
+          APP_DIR: ${{ steps.locate2.outputs.appdir }}
+          APP_EXE: ${{ steps.locate2.outputs.exepath }}
+        run: |
           # generate.py 会写 data.bin / app_metadata.toml 并自己 cargo build 出 rustdesk-portable-packer.exe
-          python ./generate.py -f ../../rustdesk/rustdesk -o . -e ../../rustdesk/rustdesk/rustdesk.exe
+          # 注意：-f 的目录必须包含 -e 指定的可执行文件
+          python ./generate.py -f "$env:APP_DIR" -o . -e "$env:APP_EXE"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "::error::generate.py 失败（退出码 $LASTEXITCODE）"
+            exit 1
+          }
           if (-not (Test-Path './target/release/rustdesk-portable-packer.exe')) {
             Write-Host "::error::打包器未生成"
+            Get-ChildItem -Recurse -Depth 3 ./target/release -ErrorAction SilentlyContinue |
+              Select-Object -First 30 FullName
             exit 1
           }
           Copy-Item './target/release/rustdesk-portable-packer.exe' `
@@ -180,7 +217,7 @@ jobs:
           Write-Host "created $f ($([math]::Round((Get-Item $f).Length/1MB,2)) MB)"
 
       - name: Upload installer exe
-        if: ${{ steps.dl2.outcome == 'success' }}
+        if: ${{ steps.locate2.outcome == 'success' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: rustdesk-windows-x86_64-install.exe
