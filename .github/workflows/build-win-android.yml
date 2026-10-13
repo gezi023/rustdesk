@@ -139,6 +139,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # 必须带上子模块：libs/hbb_common 是根 workspace 的 member，
+          # 缺了它 cargo 会报 "failed to load manifest for workspace member ... base ... hbb_common"
+          submodules: recursive
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
@@ -191,6 +195,8 @@ jobs:
           Get-ChildItem $exe.Directory.FullName | Select-Object -First 15 Name, Length
 
       - name: Generate blob + build portable packer
+        id: gen
+        continue-on-error: true
         if: ${{ steps.locate2.outcome == 'success' }}
         shell: pwsh
         working-directory: libs/portable
@@ -198,26 +204,43 @@ jobs:
           APP_DIR: ${{ steps.locate2.outputs.appdir }}
           APP_EXE: ${{ steps.locate2.outputs.exepath }}
         run: |
-          # generate.py 会写 data.bin / app_metadata.toml 并自己 cargo build 出 rustdesk-portable-packer.exe
-          # 注意：-f 的目录必须包含 -e 指定的可执行文件
-          python ./generate.py -f "$env:APP_DIR" -o . -e "$env:APP_EXE"
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "::error::generate.py 失败（退出码 $LASTEXITCODE）"
-            exit 1
+          $ErrorActionPreference = 'Continue'
+          Write-Host "python  : $((Get-Command python -ErrorAction SilentlyContinue).Source)"
+          Write-Host "cargo   : $((Get-Command cargo -ErrorAction SilentlyContinue).Source)"
+          Write-Host "APP_DIR : $env:APP_DIR"
+          Write-Host "APP_EXE : $env:APP_EXE"
+          Write-Host "cwd     : $(Get-Location)"
+          Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue
+
+          Write-Host "`n--- 运行 generate.py ---"
+          python ./generate.py -f "$env:APP_DIR" -o . -e "$env:APP_EXE" 2>&1 |
+            Tee-Object -FilePath gen.log
+          $code = $LASTEXITCODE
+          Write-Host "`n--- generate.py 退出码: $code ---"
+
+          Write-Host "`n--- libs/portable 目录内容 ---"
+          Get-ChildItem | Select-Object Name, Length | Format-Table -AutoSize | Out-String | Write-Host
+          Write-Host "--- 找 rustdesk-portable-packer.exe ---"
+          $packer = Get-ChildItem -Path . -Filter 'rustdesk-portable-packer.exe' -Recurse -File -ErrorAction SilentlyContinue |
+                    Select-Object -First 1
+
+          if ($code -eq 0 -and $packer) {
+            Copy-Item $packer.FullName "../../rustdesk-${{ steps.ver.outputs.version }}-x86_64-install.exe" -Force
+            $f = "../../rustdesk-${{ steps.ver.outputs.version }}-x86_64-install.exe"
+            Write-Host "::notice::created $f ($([math]::Round((Get-Item $f).Length/1MB,2)) MB)"
+            "ok=true" >> $env:GITHUB_OUTPUT
+          } else {
+            Write-Host "packer 路径: $(if ($packer) { $packer.FullName } else { '未找到' })"
+            if (Test-Path gen.log) {
+              Write-Host "`n--- generate.py 日志末尾 40 行 ---"
+              Get-Content gen.log -Tail 40 | Write-Host
+            }
+            Write-Host "::error::单文件安装包生成失败（退出码 $code）。Windows 便携版 zip 与 APK 不受影响。"
+            "ok=false" >> $env:GITHUB_OUTPUT
           }
-          if (-not (Test-Path './target/release/rustdesk-portable-packer.exe')) {
-            Write-Host "::error::打包器未生成"
-            Get-ChildItem -Recurse -Depth 3 ./target/release -ErrorAction SilentlyContinue |
-              Select-Object -First 30 FullName
-            exit 1
-          }
-          Copy-Item './target/release/rustdesk-portable-packer.exe' `
-            "../../rustdesk-${{ steps.ver.outputs.version }}-x86_64-install.exe" -Force
-          $f = "../../rustdesk-${{ steps.ver.outputs.version }}-x86_64-install.exe"
-          Write-Host "created $f ($([math]::Round((Get-Item $f).Length/1MB,2)) MB)"
 
       - name: Upload installer exe
-        if: ${{ steps.locate2.outcome == 'success' }}
+        if: ${{ steps.gen.outputs.ok == 'true' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: rustdesk-windows-x86_64-install.exe
