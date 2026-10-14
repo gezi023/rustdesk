@@ -214,20 +214,13 @@ jobs:
 
           # generate.py 把 cargo 调用硬编码成 `cargo build --locked --release`。
           # 官方 CI 构建主程序时会重新生成根 Cargo.lock，导致 --locked 校验失败而秒退。
-          # 这里用一个运行时补丁：先把 "--locked" 替换掉，让 cargo 自行解析依赖。
-          $patcher = @'
-import io, sys
-src = io.open("generate.py", encoding="utf-8").read()
-needle = '"cargo", "build", "--locked", "--release"'
-repl = '"cargo", "build", "--release"'
-if needle in src:
-    io.open("generate.py", "w", encoding="utf-8", newline="").write(src.replace(needle, repl))
-    print("[patch] 已移除 cargo --locked，避免 lock 不同步导致失败")
-else:
-    print("[patch] 未找到 --locked 字面量，保持原样")
-'@
-          $patcher | Out-File -FilePath patch_locked.py -Encoding utf8
+          # 这里用单引号字符串（PowerShell 里 '' 表示一个 "）写入一个补丁脚本，
+          # 不改上游文件本身；不用 here-string，避免闭合符顶格要求破坏 YAML 缩进。
+          $patch = 'import io; p="generate.py"; s=io.open(p,encoding="utf-8").read(); old=''\"cargo\", "build", "--locked", "--release"''; new=''\"cargo\", "build", "--release"''; io.open(p,"w",encoding="utf-8",newline="").write(s.replace(old,new)) if old in s else None; print("[patch] locked/" + str(old in s))'
+          Set-Content -Path patch_locked.py -Value $patch -Encoding utf8
           python ./patch_locked.py 2>&1 | Write-Host
+          Write-Host "--- generate.py 里的 cargo 调用现在是 ---"
+          Select-String -Path generate.py -Pattern 'cmd = \[' | ForEach-Object { Write-Host $_.Line.Trim() }
 
           Write-Host "`n--- 运行 generate.py ---"
           python ./generate.py -f "$env:APP_DIR" -o . -e "$env:APP_EXE" 2>&1 |
