@@ -212,6 +212,23 @@ jobs:
           Write-Host "cwd     : $(Get-Location)"
           Remove-Item Env:\CARGO_TARGET_DIR -ErrorAction SilentlyContinue
 
+          # generate.py 把 cargo 调用硬编码成 `cargo build --locked --release`。
+          # 官方 CI 构建主程序时会重新生成根 Cargo.lock，导致 --locked 校验失败而秒退。
+          # 这里用一个运行时补丁：先把 "--locked" 替换掉，让 cargo 自行解析依赖。
+          $patcher = @'
+import io, sys
+src = io.open("generate.py", encoding="utf-8").read()
+needle = '"cargo", "build", "--locked", "--release"'
+repl = '"cargo", "build", "--release"'
+if needle in src:
+    io.open("generate.py", "w", encoding="utf-8", newline="").write(src.replace(needle, repl))
+    print("[patch] 已移除 cargo --locked，避免 lock 不同步导致失败")
+else:
+    print("[patch] 未找到 --locked 字面量，保持原样")
+'@
+          $patcher | Out-File -FilePath patch_locked.py -Encoding utf8
+          python ./patch_locked.py 2>&1 | Write-Host
+
           Write-Host "`n--- 运行 generate.py ---"
           python ./generate.py -f "$env:APP_DIR" -o . -e "$env:APP_EXE" 2>&1 |
             Tee-Object -FilePath gen.log
@@ -220,9 +237,15 @@ jobs:
 
           Write-Host "`n--- libs/portable 目录内容 ---"
           Get-ChildItem | Select-Object Name, Length | Format-Table -AutoSize | Out-String | Write-Host
-          Write-Host "--- 找 rustdesk-portable-packer.exe ---"
-          $packer = Get-ChildItem -Path . -Filter 'rustdesk-portable-packer.exe' -Recurse -File -ErrorAction SilentlyContinue |
-                    Select-Object -First 1
+          Write-Host "--- 找 rustdesk-portable-packer.exe（仓库根 target 优先） ---"
+          $packer = @(
+            '..\..\target\release\rustdesk-portable-packer.exe',
+            '.\target\release\rustdesk-portable-packer.exe'
+          ) | ForEach-Object { if (Test-Path $_) { Get-Item $_ } } | Select-Object -First 1
+          if (-not $packer) {
+            $packer = Get-ChildItem -Path ..\..\target, .\target -Filter 'rustdesk-portable-packer.exe' `
+                      -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1
+          }
 
           if ($code -eq 0 -and $packer) {
             Copy-Item $packer.FullName "../../rustdesk-${{ steps.ver.outputs.version }}-x86_64-install.exe" -Force
